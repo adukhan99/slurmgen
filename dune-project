@@ -5,22 +5,21 @@
 (generate_opam_files true)
 
 (source
- (github username/reponame))
+ (github adukhan99/slurmgen))
 
-(authors "Author Name <author@example.com>")
+(authors "Alex Dukhan <agdukhan@gmail.com>")
 
-(maintainers "Maintainer Name <maintainer@example.com>")
+(maintainers "Alex Dukhan <agdukhan@gmail.com>")
 
 (license LICENSE)
 
-(documentation https://url/to/documentation)
+(documentation "")
 
 (package
  (name slurmgen)
- (synopsis "A short synopsis")
- (description "A longer description")
+ (synopsis "Generate SLURM headers")
+ (description
+  "SLURM headers are often tedious and error-prone. This tool generates them based on S-expressions.")
  (depends ocaml)
  (tags
-  ("add topics" "to describe" your project)))
-
-; See the complete stanza docs at https://dune.readthedocs.io/en/stable/reference/dune-project/index.html
+  ("slurm" "hpc" "header")))

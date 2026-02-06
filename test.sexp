@@ -1,0 +1,1 @@
+(mail_type NONE)(nodes 10)

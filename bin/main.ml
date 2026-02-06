@@ -16,7 +16,7 @@ type slurm_config = {
   ntasks_per_node : int;
   cpus_per_task : int;
   mem : int;
-  partition : string; [@key "p"]
+  partition : string;
   time : int * int * int;
   job_name : string;
   mail_type : mail_option;
@@ -69,11 +69,22 @@ let sexp_to_kv = function
     
 
 let () =
-  let argv = Sys.get_argv () in
+  let input_str = ref "" in
+  let from_file = ref false in
+  let args = [
+    ("-f", Stdlib.Arg.Set from_file, "Interpret the final argument as a filename");
+  ] in
+  Stdlib.Arg.parse args (fun s -> input_str := s) "Usage: slurmgen [-f] <s-exp string | filename>";
   let overrides =
-    if Array.length argv > 1
-    then Sexp.of_string_many argv.(Array.length argv - 1)
-    else []
+    let raw =
+      if !from_file
+      then Sexp.load_sexps !input_str
+      else Sexp.of_string_many !input_str
+    in
+    match raw with
+      | [Sexp.List (Sexp.List _ :: _ as inner)] -> inner
+      | [Sexp.List [Sexp.Atom _; _]] -> raw
+      | _ -> raw
   in
   let default_sexp =
     sexp_of_slurm_config default
