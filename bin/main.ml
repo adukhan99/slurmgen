@@ -36,15 +36,6 @@ let default = {
   mail_user = "example@uni.edu"
 }
 
-let validate_mail_type str =
-  match String.uppercase str with
-  | "ALL" -> ALL
-  | "BEGIN" -> BEGIN
-  | "END" -> END
-  | "FAIL" -> FAIL
-  | "NONE" -> NONE
-  | _ -> failwith ("Invalid mail-type: " ^ str)
-
 let patch_sexp defaults overrides =
   let override_map =
     List.filter_map overrides ~f:(function
@@ -81,14 +72,20 @@ let () =
   let argv = Sys.get_argv () in
   let overrides =
     if Array.length argv > 1
-    then Sexp.of_string_many argv.(1)
+    then Sexp.of_string_many argv.(Array.length argv - 1)
     else []
   in
   let default_sexp =
     sexp_of_slurm_config default
   in
   let final_sexp =
-    patch_sexp default_sexp overrides
+    let patched_sexp = patch_sexp default_sexp overrides in
+    try
+      let config = slurm_config_of_sexp patched_sexp in
+      sexp_of_slurm_config config
+    with exn ->
+      Stdio.eprintf "%s\n" (Exn.to_string exn);
+      Stdlib.exit 1
   in
   let header =
     match final_sexp with
@@ -98,5 +95,5 @@ let () =
         |> String.concat ~sep:""
     | _ -> ""
   in
-  Stdio.printf "%s\n" header
+  printf "%s\n" header
 
