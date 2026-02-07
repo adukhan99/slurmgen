@@ -68,18 +68,13 @@ let sexp_to_kv = function
   | _ -> None
     
 
-let () =
-  let input_str = ref "" in
-  let from_file = ref false in
-  let args = [
-    ("-f", Stdlib.Arg.Set from_file, "Interpret the final argument as a filename");
-  ] in
-  Stdlib.Arg.parse args (fun s -> input_str := s) "Usage: slurmgen [-f] <s-exp string | filename>";
+
+let run input_str from_file =
   let overrides =
     let raw =
-      if !from_file
-      then Sexp.load_sexps !input_str
-      else Sexp.of_string_many !input_str
+      if from_file
+      then Sexp.load_sexps input_str
+      else Sexp.of_string_many input_str
     in
     match raw with
       | [Sexp.List (Sexp.List _ :: _ as inner)] -> inner
@@ -107,4 +102,21 @@ let () =
     | _ -> ""
   in
   printf "%s\n" header
+
+let () =
+  let open Cmdliner in
+  let input_str =
+    let doc = "S-expression string or filename (if -f is used)." in
+    Arg.(required & pos 0 (some string) None & info [] ~docv:"INPUT" ~doc)
+  in
+  let from_file =
+    let doc = "Interpret the input argument as a filename." in
+    Arg.(value & flag & info ["f"; "file"] ~doc)
+  in
+  let cmd =
+    let doc = "Generate SLURM headers from S-expressions" in
+    let info = Cmd.info "slurmgen" ~doc in
+    Cmd.v info Term.(const run $ input_str $ from_file)
+  in
+  Stdlib.exit (Cmd.eval cmd)
 
