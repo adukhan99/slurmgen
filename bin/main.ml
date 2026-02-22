@@ -69,20 +69,28 @@ let sexp_to_kv = function
     
 
 
-let run input_str from_file =
+let load_sexp_overrides raw =
+  match raw with
+  | [Sexp.List (Sexp.List _ :: _ as inner)] -> inner
+  | [Sexp.List [Sexp.Atom _; _]] -> raw
+  | _ -> raw
+
+let run input_str from_file use_default_config =
   let overrides =
     let raw =
       if from_file
       then Sexp.load_sexps input_str
       else Sexp.of_string_many input_str
     in
-    match raw with
-      | [Sexp.List (Sexp.List _ :: _ as inner)] -> inner
-      | [Sexp.List [Sexp.Atom _; _]] -> raw
-      | _ -> raw
+    load_sexp_overrides raw
   in
+  let base_default_sexp = sexp_of_slurm_config default in
   let default_sexp =
-    sexp_of_slurm_config default
+    if use_default_config then
+      let cfg_overrides = load_sexp_overrides (Sexp.load_sexps "config.sexp") in
+      patch_sexp base_default_sexp cfg_overrides
+    else
+      base_default_sexp
   in
   let final_sexp =
     let patched_sexp = patch_sexp default_sexp overrides in
@@ -113,10 +121,14 @@ let () =
     let doc = "Interpret the input argument as a filename." in
     Arg.(value & flag & info ["f"; "file"] ~doc)
   in
+  let use_default_config =
+    let doc = "Read config.sexp from the current directory and apply it as the default configuration before any other overrides." in
+    Arg.(value & flag & info ["d"; "default-config"] ~doc)
+  in
   let cmd =
     let doc = "Generate SLURM headers from S-expressions" in
     let info = Cmd.info "slurmgen" ~doc in
-    Cmd.v info Term.(const run $ input_str $ from_file)
+    Cmd.v info Term.(const run $ input_str $ from_file $ use_default_config)
   in
   Stdlib.exit (Cmd.eval cmd)
 

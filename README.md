@@ -8,9 +8,9 @@ Instead of hand-editing SLURM scripts (and discovering mistakes at queue time), 
 # useage
 After cloning, run with: 
 ```dune exec slurmgen -- "(S-exp)"``` 
-or 
-```dune exec slurmgen -- -f "./test.sexp"``` (if your S-expression is in a file)
-S-expressions are formatted without toplevel parentheses, e.g. ```"(nodes 4)(time (24 0 0))"``` is valid
+or using -f to read from a file as in -f "./test.sexp"
+or with -d to use a custom default config.sexp as the base header
+Toplevel S-expressions are valid, as are nested S-expressions.
 
 # roadmap
 1. Implement full type checking of input
