@@ -8,10 +8,14 @@ Instead of hand-editing SLURM scripts (and discovering mistakes at queue time), 
 # useage
 After cloning, run with: 
 ```dune exec slurmgen -- "(S-exp)"``` 
-or using -f to read from a file as in -f "./test.sexp"
+or with -f to read from a file as in -f "./test.sexp"
 or with -d to use a custom default config.sexp as the base header
 Toplevel S-expressions are valid, as are nested S-expressions.
 
+# altering options
+Addition of new options is supported via the `(new (KEY val...))` syntax.
+Removal of options is supported via the `(rm KEY)` syntax.
+
 # roadmap
-1. Implement full type checking of input
-2. Allow second and third options to enable cli tag generation, the absence of certain options, and the creation of custom options
+1. Ensure type checking is deeply robust, even for custom options
+2. More deeply integrate with slurm to allow for more advanced features
