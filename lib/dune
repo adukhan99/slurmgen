@@ -1,2 +1,3 @@
 (library
- (name slurmgen))
+ (name slurmgen)
+ (libraries base sexplib str))

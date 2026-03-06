@@ -1,6 +1,4 @@
 (executable
  (public_name slurmgen)
  (name main)
- (libraries base sexplib stdio cmdliner)
- (preprocess
-  (pps ppx_sexp_conv)))
+ (libraries base sexplib stdio cmdliner str slurmgen))

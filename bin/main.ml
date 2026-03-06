@@ -1,187 +1,126 @@
 open Base
 open Stdio
 
-type mail_option =
-  | ALL
-  | BEGIN
-  | END
-  | FAIL
-  | NONE
-[@@deriving sexp]
+(* ─── Helpers ───────────────────────────────────────────────────────── *)
 
-type slurm_config =
-  { account          : string
-  ; nodes            : int
-  ; ntasks_per_node  : int
-  ; cpus_per_task    : int
-  ; mem              : int
-  ; partition        : string
-  ; time             : int * int * int
-  ; job_name         : string
-  ; mail_type        : mail_option
-  ; mail_user        : string
-  }
-[@@deriving sexp]
+let die fmt =
+  Printf.ksprintf (fun msg -> eprintf "%s\n" msg; Stdlib.exit 1) fmt
 
-type slurm_extra_entry =
-  { key   : string
-  ; value : Sexplib.Sexp.t
-  }
-
-type slurm_job =
-  { config  : slurm_config
-  ; extra   : slurm_extra_entry list
-  ; removes : string list
-  }
-
-(* The set of field names that belong to [slurm_config].  Used to prevent
-   (new ...) overrides from shadowing base fields. *)
-let known_fields =
-  Set.of_list
-    (module String)
-    [ "account"; "nodes"; "ntasks_per_node"; "cpus_per_task"
-    ; "mem"; "partition"; "time"; "job_name"; "mail_type"; "mail_user"
-    ]
-
-let default : slurm_config =
-  { account         = "SLURMACC"
-  ; nodes           = 1
-  ; ntasks_per_node = 1
-  ; cpus_per_task   = 1
-  ; mem             = 16
-  ; partition       = "nodes"
-  ; time            = (48, 0, 0)
-  ; job_name        = "DFLT"
-  ; mail_type       = ALL
-  ; mail_user       = "example@uni.edu"
-  }
-
-(* Apply [overrides] (a list of [(key value)] sexps) on top of [defaults]
-   (a record-shaped sexp), replacing matching keys in place. *)
-let patch_sexp defaults overrides =
-  let override_map =
-    List.filter_map overrides ~f:(function
-      | Sexplib.Sexp.List [ Atom k; v ] -> Some (k, v)
-      | _ -> None)
-  in
-  match defaults with
-  | Sexplib.Sexp.List fields ->
-    let patch_field = function
-      | Sexplib.Sexp.List [ Atom k; v ] ->
-        let v' =
-          Option.value (List.Assoc.find override_map ~equal:String.equal k) ~default:v
-        in
-        Sexplib.Sexp.List [ Atom k; v' ]
-      | other -> other
-    in
-    Sexplib.Sexp.List (List.map fields ~f:patch_field)
-  | _ -> defaults
-
-(* Convert a [(key value)] or [(key (a b c))] sexp into a "#SBATCH --key=value\n"
-   string.  Returns [None] for any sexp that doesn't match either shape. *)
-let sexp_to_kv = function
-  | Sexplib.Sexp.List [ Atom k; Atom v ] ->
-    Some (Printf.sprintf "#SBATCH --%s=%s\n" k v)
-  | Sexplib.Sexp.List [ Atom k; Sexplib.Sexp.List vs ] ->
-    let v =
-      List.filter_map vs ~f:(function Sexplib.Sexp.Atom s -> Some s | _ -> None)
-      |> String.concat ~sep:":"
-    in
-    Some (Printf.sprintf "#SBATCH --%s=%s\n" k v)
-  | _ -> None
-
-(* Unwrap a single-element list that itself contains a record-shaped list,
-   which is the shape produced by [Sexp.load_sexps] on a file that holds
-   one top-level record.  Falls through to the raw list otherwise. *)
+(** Unwrap a single-element list that itself contains a record-shaped list,
+    which is the shape produced by [Sexp.load_sexps] on a file that holds
+    one top-level record.  Falls through to the raw list otherwise. *)
 let unwrap_sexp_list = function
   | [ Sexplib.Sexp.List (Sexplib.Sexp.List _ :: _ as inner) ] -> inner
   | raw -> raw
 
-(* Split an override list into:
-     - [base_overrides] : sexps that patch [slurm_config] fields
-     - [extras]         : extra [#SBATCH] entries from [(new KEY val...)] forms
-     - [removes]        : keys to suppress from the final output
+(* ─── Override partitioning ─────────────────────────────────────────── *)
 
-   Raises [Failure] if a [(new ...)] key shadows a known base field. *)
-let partition_overrides overrides =
-  let rec loop base extra removes = function
-    | [] -> List.rev base, List.rev extra, List.rev removes
-    | Sexplib.Sexp.List [ Sexp.Atom "new"; Sexp.List (Sexp.Atom k :: vs) ] :: rest ->
-      if Set.mem known_fields k then
-        failwith
-          (Printf.sprintf
-             "Error: '%s' is a base config field; use (%s ...) directly instead." k k)
-      else
-        let entry = { key = k; value = Sexplib.Sexp.List (Sexp.Atom k :: vs) } in
-        loop base (entry :: extra) removes rest
-    | Sexplib.Sexp.List [ Sexp.Atom "rm"; Sexp.Atom k ] :: rest ->
-      loop base extra (k :: removes) rest
+(** Split user-supplied sexps into:
+    - [overrides] : [(key value)] pairs that patch existing fields
+    - [removes]   : field names to suppress from the final output
+
+    Unlike the old version, there is no special [new] form — every field is
+    just [(key value)].  If the key is in the schema, great; if not, an
+    error will surface at validation time. *)
+let partition_overrides sexps =
+  let rec loop overrides removes = function
+    | [] -> List.rev overrides, List.rev removes
+    | Sexplib.Sexp.List [ Sexplib.Sexp.Atom "rm"; Sexplib.Sexp.Atom k ] :: rest ->
+      loop overrides (k :: removes) rest
     | other :: rest ->
-      loop (other :: base) extra removes rest
+      loop (other :: overrides) removes rest
   in
-  loop [] [] [] overrides
+  loop [] [] sexps
 
-let die fmt = Printf.ksprintf (fun msg -> eprintf "%s\n" msg; Stdlib.exit 1) fmt
+(* ─── Locate config files ──────────────────────────────────────────── *)
 
-(* True when [field] is a sexp record entry whose key is NOT [key].
-   Used to filter out removed fields before rendering. *)
-let field_has_different_key key = function
-  | Sexplib.Sexp.List (Atom k :: _) -> not (String.equal k key)
-  | _ -> true
+(** Search order for a configuration file:
+    1. Current directory
+    2. [~/.config/slurmgen/]
+    Returns [None] if not found anywhere. *)
+let find_config_file name =
+  let cwd_path = name in
+  if Stdlib.Sys.file_exists cwd_path then Some cwd_path
+  else
+    match Stdlib.Sys.getenv_opt "HOME" with
+    | Some home ->
+      let xdg_path = Printf.sprintf "%s/.config/slurmgen/%s" home name in
+      if Stdlib.Sys.file_exists xdg_path then Some xdg_path
+      else None
+    | None -> None
 
-let run input_str from_file use_default_config =
+let require_config_file name =
+  match find_config_file name with
+  | Some path -> path
+  | None ->
+    die "Cannot find '%s'. Looked in:\n  - ./%s\n  - ~/.config/slurmgen/%s"
+      name name name
+
+(* ─── Main logic ────────────────────────────────────────────────────── *)
+
+let run input_str from_file use_default_config schema_path defaults_path =
+  (* 1. Load the schema *)
+  let schema_file = match schema_path with
+    | Some p -> p
+    | None   -> require_config_file "schema.sexp"
+  in
+  let schema =
+    match Slurmgen.Schema.load_file schema_file with
+    | Ok s    -> s
+    | Error e -> die "%s" e
+  in
+
+  (* 2. Load the defaults *)
+  let defaults_file = match defaults_path with
+    | Some p -> p
+    | None   -> require_config_file "defaults.sexp"
+  in
+  let base_config =
+    match Slurmgen.Config.load_file ~schema defaults_file with
+    | Ok c    -> c
+    | Error e -> die "In defaults: %s" e
+  in
+
+  (* 3. Optionally layer config.sexp on top of defaults *)
+  let config_after_defaults =
+    if use_default_config then begin
+      match find_config_file "config.sexp" with
+      | None ->
+        eprintf "Warning: -d passed but no config.sexp found, using defaults only.\n";
+        base_config
+      | Some cfg_path ->
+        match Slurmgen.Config.load_file ~schema cfg_path with
+        | Ok cfg_overrides ->
+          Slurmgen.Config.merge ~base:base_config ~overrides:cfg_overrides
+        | Error e -> die "In config.sexp: %s" e
+    end else
+      base_config
+  in
+
+  (* 4. Parse the user's CLI / file overrides *)
   let raw_overrides =
     (if from_file then Sexplib.Sexp.load_sexps input_str
      else Sexplib.Sexp.of_string_many input_str)
     |> unwrap_sexp_list
   in
-  let base_overrides, extras, removes =
-    match partition_overrides raw_overrides with
-    | exception Failure msg -> die "%s" msg
-    | result -> result
+  let override_sexps, removes = partition_overrides raw_overrides in
+
+  (* 5. Validate and merge the CLI overrides *)
+  let cli_overrides =
+    match Slurmgen.Config.of_sexps ~schema override_sexps with
+    | Ok c    -> c
+    | Error e -> die "%s" e
   in
-  let base_default_sexp = sexp_of_slurm_config default in
-  let default_sexp, total_removes =
-    if use_default_config then begin
-      let cfg_overrides =
-        Sexplib.Sexp.load_sexps "config.sexp"
-        |> unwrap_sexp_list
-      in
-      let cfg_base, _, cfg_removes =
-        match partition_overrides cfg_overrides with
-        | exception Failure msg -> die "%s" msg
-        | result -> result
-      in
-      patch_sexp base_default_sexp cfg_base, cfg_removes @ removes
-    end else
-      base_default_sexp, removes
+  let final_config =
+    Slurmgen.Config.merge ~base:config_after_defaults ~overrides:cli_overrides
   in
-  let config =
-    let patched = patch_sexp default_sexp base_overrides in
-    match slurm_config_of_sexp patched with
-    | exception exn -> die "%s" (Exn.to_string exn)
-    | cfg -> cfg
-  in
-  let job = { config; extra = extras; removes = total_removes } in
-  let keep field =
-    List.for_all job.removes ~f:(fun k -> field_has_different_key k field)
-  in
-  let base_header =
-    match sexp_of_slurm_config job.config with
-    | Sexplib.Sexp.List fields ->
-      fields
-      |> List.filter ~f:keep
-      |> List.filter_map ~f:sexp_to_kv
-      |> String.concat ~sep:""
-    | _ -> assert false
-  in
-  let extra_header =
-    job.extra
-    |> List.filter ~f:(fun e -> not (List.mem job.removes e.key ~equal:String.equal))
-    |> List.filter_map ~f:(fun e -> sexp_to_kv e.value)
-    |> String.concat ~sep:""
-  in
-  print_string (base_header ^ extra_header ^ "\n")
+
+  (* 6. Remove any (rm ...) keys and render *)
+  let after_removes = Slurmgen.Config.remove_keys final_config removes in
+  let rendered = Slurmgen.Config.render after_removes in
+  print_string rendered
+
+(* ─── CLI ───────────────────────────────────────────────────────────── *)
 
 let () =
   let open Cmdliner in
@@ -195,14 +134,42 @@ let () =
   in
   let use_default_config =
     let doc =
-      "Read config.sexp from the current directory and apply it as \
-       the default configuration before any other overrides."
+      "Read config.sexp from the current directory (or ~/.config/slurmgen/) \
+       and apply it as the default configuration before any other overrides."
     in
     Arg.(value & flag & info [ "d"; "default-config" ] ~doc)
   in
+  let schema_path =
+    let doc =
+      "Path to schema.sexp. If not given, slurmgen looks in the current \
+       directory and then ~/.config/slurmgen/."
+    in
+    Arg.(value & opt (some string) None & info [ "schema" ] ~docv:"FILE" ~doc)
+  in
+  let defaults_path =
+    let doc =
+      "Path to defaults.sexp. If not given, slurmgen looks in the current \
+       directory and then ~/.config/slurmgen/."
+    in
+    Arg.(value & opt (some string) None & info [ "defaults" ] ~docv:"FILE" ~doc)
+  in
   let cmd =
     let doc = "Generate SLURM headers from S-expressions." in
-    let info = Cmd.info "slurmgen" ~doc in
-    Cmd.v info Term.(const run $ input_str $ from_file $ use_default_config)
+    let man = [
+      `S Manpage.s_description;
+      `P "slurmgen generates #SBATCH header blocks for SLURM job scripts.";
+      `P "Fields and their types are defined in schema.sexp. \
+          Default values come from defaults.sexp. Both files are looked \
+          for in the current directory and then ~/.config/slurmgen/.";
+      `P "Override any field on the command line with (key value) pairs. \
+          Suppress a field with (rm key).";
+      `S "EXAMPLES";
+      `Pre "  slurmgen '(nodes 4)(mem 64)'";
+      `Pre "  slurmgen -d '(partition gpu)(nodes 2)'";
+      `Pre "  slurmgen -f overrides.sexp";
+    ] in
+    let info = Cmd.info "slurmgen" ~doc ~man in
+    Cmd.v info Term.(const run $ input_str $ from_file $ use_default_config
+                     $ schema_path $ defaults_path)
   in
   Stdlib.exit (Cmd.eval cmd)
